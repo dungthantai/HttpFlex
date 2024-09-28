@@ -15,7 +15,7 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-package service.core;
+package HttpFlex;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -44,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -52,13 +53,16 @@ import com.google.gson.Gson;
 import com.google.gson.JsonParseException;
 
 public class HttpFlex {
-	static Gson defaultGson = new Gson();
-	static AtomicBoolean defaultDebug = new AtomicBoolean();
-	boolean debug = false;
-	HttpRequest.Builder requestBuilder = HttpRequest.newBuilder();
-	HttpClient.Builder clientBuilder = HttpClient.newBuilder();
+	final static AtomicBoolean defaultDebug = new AtomicBoolean();
+	boolean debug;
+
+	static final AtomicReference<Gson> defaultGson = new AtomicReference<>(new Gson());
+	Gson gson = null;
+
+	final HttpRequest.Builder requestBuilder = HttpRequest.newBuilder();
+	final HttpClient.Builder clientBuilder = HttpClient.newBuilder();
 	HttpRequest request;
-	Gson gson = new Gson();
+	HttpResponse<?> httpResponse;
 
 	/**
 	 * Sets the default debug mode for all instances of HttpFlex.
@@ -74,7 +78,7 @@ public class HttpFlex {
 	 * Enables or disables debug mode for this instance of HttpFlex.
 	 *
 	 * @param allowDebug true to enable debug mode, false to disable
-	 * @return
+	 * @return this
 	 */
 
 	public HttpFlex debug(boolean allowDebug) {
@@ -93,6 +97,10 @@ public class HttpFlex {
 		return this;
 	}
 
+	public Gson gson() {
+		return (gson != null) ? gson : defaultGson.get();
+	}
+
 	/**
 	 * Sets the default Gson instance to be used for JSON serialization and
 	 * deserialization across all instances of HttpFlex. Use for
@@ -102,7 +110,7 @@ public class HttpFlex {
 	 */
 
 	public static void setDefaultGson(Gson gson) {
-		defaultGson = gson;
+		defaultGson.set(gson);
 	}
 
 	/**
@@ -153,7 +161,6 @@ public class HttpFlex {
 		return new HttpFlex(uri);
 	}
 
-	HttpResponse<?> httpResponse;
 
 	/**
 	 * Retrieves the HttpResponse from the last request made.
@@ -173,30 +180,28 @@ public class HttpFlex {
 	 */
 	private <R> R getResponse(Class<R> clazz) {
 		if (debug) {
-			System.out.println("\nFrom method : " + Thread.currentThread().getStackTrace()[3].getMethodName()
-					+ "\nRequest : " + request.uri().toString() + "\n");
+			System.out.println("\nFrom method: " + Thread.currentThread().getStackTrace()[3].getMethodName() + "\nRequest: " + request.uri().toString() + "\n");
 		}
 		try (HttpClient httpclient = clientBuilder.build()) {
 			this.httpResponse = switch (clazz.getSimpleName()) {
-			case "InputStream" -> clientBuilder.build().send(request, BodyHandlers.ofInputStream());
-			case "byte[]" -> httpclient.send(request, BodyHandlers.ofByteArray());
-			default -> httpclient.send(request, BodyHandlers.ofString());
+				case "InputStream" -> clientBuilder.build().send(request, BodyHandlers.ofInputStream());
+				case "byte[]" -> httpclient.send(request, BodyHandlers.ofByteArray());
+				default -> httpclient.send(request, BodyHandlers.ofString());
 			};
 
 			if (debug) {
-				if (httpResponse.body() instanceof InputStream inputStream) {
-					System.out.println("Response Body: InputStream " + inputStream.available() / 1024 + "KB\n");
-				} else if (httpResponse.body() instanceof byte[] bytes) {
-					System.out.println("Response Body: Bytes " + bytes.length / 1024 + "KB\n");
-				} else {
-					System.out.println("Response Body: " + httpResponse.body().toString() + "\n");
-				}
+				System.out.println(switch (httpResponse.body()) {
+					case InputStream inputStream ->
+							"Response Body: InputStream " + (inputStream.available() / 1024) + "KB\n";
+					case byte[] bytes -> "Response Body: Bytes " + (bytes.length / 1024) + "KB\n";
+					default -> "Response Body: " + httpResponse.body().toString() + "\n";
+				});
 			}
 
 			if (clazz.equals(InputStream.class) || clazz.equals(byte[].class) || clazz.equals(String.class)) {
 				return clazz.cast(httpResponse.body());
 			} else {
-				return gson.fromJson(httpResponse.body().toString(), clazz);
+				return gson().fromJson(httpResponse.body().toString(), clazz);
 			}
 
 		} catch (JsonParseException | IOException | InterruptedException e) {
@@ -214,7 +219,7 @@ public class HttpFlex {
 	 */
 
 	private <R> R getResponse(Type type) {
-		return gson.fromJson(getResponse(String.class), type);
+		return gson().fromJson(getResponse(String.class), type);
 	}
 
 	/**
@@ -236,56 +241,54 @@ public class HttpFlex {
 	 * @param requestBody the request body object
 	 */
 	private <T> void setRequest(String method, T requestBody) {
-		if (debug && requestBody != null) {
-			System.out.println("\nRequest Body : " + (requestBody instanceof String ? requestBody
-					: (requestBody.toString().length() > 200 ? requestBody.toString().substring(0, 200) + "..."
-							: requestBody.toString())));
-		}
 		method = method.toUpperCase();
-		request = switch (requestBody) {
-		case null -> request = requestBuilder.method(method, BodyPublishers.noBody()).build();
-		case String string ->
-			requestBuilder.method(method, BodyPublishers.ofString(string, StandardCharsets.UTF_8)).build();
-		case InputStream inputStream ->
-			requestBuilder.method(method, BodyPublishers.ofInputStream(() -> inputStream)).build();
-		case byte[] bytes -> requestBuilder.method(method, BodyPublishers.ofByteArray(bytes)).build();
-		case Multipart multipart -> requestBuilder.headers(ContentType.MULTIPART(multipart.boundary).headerValues())
-				.method(method, BodyPublishers.ofByteArray(multipart.build())).build();
-		case UrlEncoded urlEncoded -> requestBuilder.headers(ContentType.URLENC.headerValues())
-				.method(method, BodyPublishers.ofString(urlEncoded.build())).build();
-		default -> requestBuilder.headers(ContentType.JSON.headerValues())
-				.method(method, BodyPublishers.ofString(gson.toJson(requestBody), StandardCharsets.UTF_8)).build();
-		};
+		if (debug && requestBody != null) {
+			System.out.println("\nRequest Body : " + (requestBody instanceof String ? requestBody : (requestBody.toString().length() > 200 ? requestBody.toString().substring(0, 200) + "..." : requestBody.toString())));
+		}
+		request = requestBuilder.method(method, switch (requestBody) {
+			case null -> BodyPublishers.noBody();
+			case String s -> BodyPublishers.ofString(s, StandardCharsets.UTF_8);
+			case InputStream is -> BodyPublishers.ofInputStream(() -> is);
+			case byte[] b -> BodyPublishers.ofByteArray(b);
+			case Multipart m -> {
+				requestBuilder.headers(ContentType.MULTIPART(m.boundary).headerValues());
+				yield BodyPublishers.ofByteArray(m.build());
+			}
+			case UrlEncoded u -> {
+				requestBuilder.headers(ContentType.URLENC.headerValues());
+				yield BodyPublishers.ofString(u.build());
+			}
+			default -> {
+				requestBuilder.headers(ContentType.JSON.headerValues());
+				yield BodyPublishers.ofString(gson().toJson(requestBody), StandardCharsets.UTF_8);
+			}
+		}).build();
 	}
 
 	/**
 	 * Enumeration of HTTP Content-Types for setting request headers.
 	 */
 	public enum ContentType {
-		TEXT("Content-Type", "text/plain"), URLENC("Content-Type", "application/x-www-form-urlencoded"),
-		JSON("Content-Type", "application/json"), XML("Content-Type", "application/xml"),
-		MP3("Content-Type", "audio/mp3"), MP4("Content-Type", "video/mp4"),
-		OCTET("Content-Type", "application/octet-stream"), CUSTOM("Content-Type", null);
+		TEXT("text/plain"), URLENC("application/x-www-form-urlencoded"), JSON("application/json"), XML("application/xml"), MP3("audio/mp3"), MP4("video/mp4"), OCTET("application/octet-stream"), CUSTOM(null);
 
-		private String type;
+		private final String type = "Content-Type";
 		private String value;
 
-		ContentType(String type, String value) {
-			this.type = type;
+		ContentType(String value) {
 			this.value = value;
 		}
 
 		public String[] headerValues() {
-			return new String[] { type, value };
+			return new String[]{type, value};
 		}
 
-		public String desciption() {
+		public String description() {
 			return type + ": " + value;
 		}
 
 		/**
 		 * Sets the specify ContentType I not ready write in code
-		 * 
+		 *
 		 * @param content_type the HTTP Content Type (e.g., "application/json")
 		 */
 		public static ContentType custom(String content_type) {
@@ -295,7 +298,7 @@ public class HttpFlex {
 
 		/**
 		 * Sets the ContentType for multipart-formdata
-		 * 
+		 *
 		 * @param boundary the multipart-formdata
 		 */
 		public static ContentType MULTIPART(String boundary) {
@@ -307,8 +310,8 @@ public class HttpFlex {
 	/**
 	 * GET data from http server.
 	 *
-	 * @param <R>  the type of the response body
-	 * @param type is Class need to cast
+	 * @param <R>   the type of the response body
+	 * @param clazz type is Class need to cast
 	 * @return object have the same Class of clazz
 	 */
 	public <R> R get(Class<R> clazz) {
@@ -330,7 +333,6 @@ public class HttpFlex {
 	/**
 	 * GET data from http server.
 	 *
-	 * @param type is Class need to cast
 	 * @return {@link String}
 	 */
 	public String get() {
@@ -428,7 +430,7 @@ public class HttpFlex {
 
 	/**
 	 * send Custom method (eg., PUT, PATCH, OPTIONS, ...) to http server.
-	 * 
+	 *
 	 * @param method is String (eg., "put", "PUT", "patch", ...). All other same
 	 *               explain with {@link HttpFlex#post(Object, Class)}
 	 */
@@ -439,7 +441,7 @@ public class HttpFlex {
 
 	/**
 	 * send Custom method (eg., PUT, PATCH, OPTIONS, ...) to http server.
-	 * 
+	 *
 	 * @param method is String (eg., "put", "PUT", "patch", ...). All other same
 	 *               explain with {@link HttpFlex#post(Object, Type)}
 	 */
@@ -450,7 +452,7 @@ public class HttpFlex {
 
 	/**
 	 * send Custom method (eg., PUT, PATCH, OPTIONS, ...) to http server.
-	 * 
+	 *
 	 * @param method is String (eg., "put", "PUT", "patch", ...). All other same
 	 *               explain with {@link HttpFlex#post(Object)}
 	 */
@@ -460,7 +462,7 @@ public class HttpFlex {
 
 	/**
 	 * send Custom method (eg., PUT, PATCH, OPTIONS, ...) to http server.
-	 * 
+	 *
 	 * @param method is String (eg., "put", "PUT", "patch", ...). All other same
 	 *               explain with {@link HttpFlex#post()}
 	 */
@@ -470,8 +472,8 @@ public class HttpFlex {
 
 	/**
 	 * Send multiple action with instance
-	 * 
-	 * @param is Consumer<HttpFlex>
+	 *
+	 * @param consumer is Consumer<HttpFlex>
 	 */
 	public HttpFlex execute(Consumer<HttpFlex> consumer) {
 		consumer.accept(this);
@@ -480,7 +482,7 @@ public class HttpFlex {
 
 	/**
 	 * Send multiple action with instance
-	 * 
+	 *
 	 * @param <R>      return type
 	 * @param function Function<HttpFlex, R>
 	 */
@@ -491,20 +493,18 @@ public class HttpFlex {
 
 	/**
 	 * Sets the proxy authentication credentials for HTTP requests.
-	 * 
+	 *
 	 * @param username The username for proxy authentication.
 	 * @param password The password for proxy authentication.
 	 */
 	public HttpFlex proxyAuth(String username, String password) {
-		String encoded = Base64.getEncoder()
-				.encodeToString((username + ":" + password).getBytes(StandardCharsets.UTF_8));
-		requestBuilder.headers("Proxy-Authorization", "Basic " + encoded);
+		requestBuilder.headers("Proxy-Authorization", "Basic " + Base64.getEncoder().encodeToString((username + ":" + password).getBytes(StandardCharsets.UTF_8)));
 		return this;
 	}
 
 	/**
 	 * Sets the proxy server details for HTTP requests.
-	 * 
+	 *
 	 * @param ip   The IP address of the proxy server.
 	 * @param port The port number of the proxy server.
 	 */
@@ -515,7 +515,7 @@ public class HttpFlex {
 
 	/**
 	 * Sets custom headers for HTTP requests.
-	 * 
+	 *
 	 * @param keyValue An array of key-value pairs representing headers.
 	 * @return This {@code HttpFlex} instance for method chaining.
 	 */
@@ -526,20 +526,31 @@ public class HttpFlex {
 
 	/**
 	 * Sets a single header for HTTP requests.
-	 * 
+	 *
 	 * @param name  The name of the header.
 	 * @param value The value of the header.
 	 * @return This {@code HttpFlex} instance for method chaining.
 	 */
-	public HttpFlex header(String name, String Value) {
-		requestBuilder.header(name, Value);
+	public HttpFlex header(String name, String value) {
+		requestBuilder.header(name, value);
+		return this;
+	}
+
+	/**
+	 * Sets a single header for HTTP requests.
+	 *
+	 * @param token The value of the bearer access token.
+	 * @return This {@code HttpFlex} instance for method chaining.
+	 */
+	public HttpFlex bearer(String token) {
+		requestBuilder.header("Authorization", "Bearer " + token);
 		return this;
 	}
 
 	/**
 	 * Sets the Content-Type header for HTTP requests.
-	 * 
-	 * @param type The {@code ContentType} enum value representing the content type.
+	 *
+	 * @param type The {@code ContentType} enum value representing the xpathContent type.
 	 * @return This {@code HttpFlex} instance for method chaining.
 	 */
 	public HttpFlex header(ContentType type) {
@@ -551,8 +562,8 @@ public class HttpFlex {
 	 * Representation of a multipart-formdata request, use to send in
 	 * {@link HttpFlex#post(Object)}.
 	 */
-	public record Multipart(ByteArrayOutputStream requestBody, String boundary, Map<String, Object> data)
-			implements AutoCloseable {
+	public record Multipart(ByteArrayOutputStream requestBody, String boundary, Map<String, Object> data,
+	                        AtomicBoolean needRebuild) implements AutoCloseable {
 		/**
 		 * Constructs a new Multipart instance with a randomly generated boundary.
 		 */
@@ -563,12 +574,12 @@ public class HttpFlex {
 		/**
 		 * Constructs a new Multipart instance with a randomly generated boundary. And
 		 * put chunk of data to instance form-multipart.
-		 * 
-		 * @param Map.Entry Key is multipart-formdata name
-		 * @param Map.Entry Value is multipart-formdata data (can be a {@link String},
-		 *                  {@link InputStream}, byte[], or any other class will be
-		 *                  automatically convert to Json string by
-		 *                  {@link HttpFlex#defaultGson})
+		 *
+		 * @param map Map.Entry Key is multipart-formdata name
+		 *            Map.Entry Value is multipart-formdata data (can be a {@link String},
+		 *            {@link InputStream}, byte[], or any other class will be
+		 *            automatically convert to Json string by
+		 *            {@link HttpFlex#defaultGson})
 		 */
 		public static Multipart instance(Map<String, ?> map) {
 			return instance("-FormBoundary" + Long.toHexString(System.currentTimeMillis())).putAll(map);
@@ -576,24 +587,23 @@ public class HttpFlex {
 
 		/**
 		 * Constructs a new multipart-formdata instance with a custom boundary.
-		 * 
-		 * @param is multipart-formdata boundary
+		 *
+		 * @param boundary is multipart-formdata boundary
 		 */
 		public static Multipart instance(String boundary) {
-			return new Multipart(new ByteArrayOutputStream(), boundary, new LinkedHashMap<>());
+			return new Multipart(new ByteArrayOutputStream(), boundary, new LinkedHashMap<>(), new AtomicBoolean(true));
 		}
 
 		/**
 		 * Constructs a new multipart-formdata instance with a custom boundary. And put
 		 * chunk of data to instance form-multipart.
-		 * 
-		 * @param is        multipart-formdata boundary
-		 * @param Map.Entry Key is multipart-formdata name
-		 * @param Map.Entry Value is multipart-formdata data (can be a {@link String},
-		 *                  {@link InputStream}, byte[], or any other class will be
-		 *                  automatically convert to Json string by
-		 *                  {@link HttpFlex#defaultGson})
-		 * 
+		 *
+		 * @param boundary is multipart-formdata boundary
+		 * @param map      Map.Entry Key is multipart-formdata name
+		 *                 Map.Entry Value is multipart-formdata data (can be a {@link String},
+		 *                 {@link InputStream}, byte[], or any other class will be
+		 *                 automatically convert to Json string by
+		 *                 {@link HttpFlex#defaultGson})
 		 */
 		public static Multipart instance(String boundary, Map<String, ?> map) {
 			return instance(boundary).putAll(map);
@@ -601,21 +611,22 @@ public class HttpFlex {
 
 		/**
 		 * Put chunk of data to current form-multipart.
-		 * 
-		 * @param Map.Entry Key is multipart-formdata name
-		 * @param Map.Entry Value is multipart-formdata data (can be a {@link String},
-		 *                  {@link InputStream}, byte[], or any other class will be
-		 *                  automatically convert to Json string by
-		 *                  {@link HttpFlex#defaultGson})
+		 *
+		 * @param map Map.Entry Key is multipart-formdata name
+		 *            Map.Entry Value is multipart-formdata data (can be a {@link String},
+		 *            {@link InputStream}, byte[], or any other class will be
+		 *            automatically convert to Json string by
+		 *            {@link HttpFlex#defaultGson})
 		 */
 		public <T> Multipart putAll(Map<String, ?> map) {
 			data.putAll(map);
+			needRebuild.set(true);
 			return this;
 		}
 
 		/**
 		 * Put data to current form-multipart.
-		 * 
+		 *
 		 * @param name is multipart-formdata name
 		 * @param body is multipart-formdata data (can be a {@link String},
 		 *             {@link InputStream}, byte[], or any other class will be
@@ -624,6 +635,7 @@ public class HttpFlex {
 		 */
 		public <T> Multipart put(String name, T body) {
 			data.put(name, body);
+			needRebuild.set(true);
 			return this;
 		}
 
@@ -650,32 +662,33 @@ public class HttpFlex {
 		}
 
 		byte[] build() {
-			data.forEach((name, body) -> {
-				writeRequest("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"");
-				writeRequest(switch (body) {
-				case Path path -> "; filename=\"" + name + "\"\r\n" + ContentType.OCTET.desciption() + "\r\n\r\n";
-				case InputStream inputStream ->
-					"; filename=\"" + name + "\"\r\n" + ContentType.OCTET.desciption() + "\r\n\r\n";
-				case byte[] bytes -> "; filename=\"" + name + "\"\r\n" + ContentType.OCTET.desciption() + "\r\n\r\n";
-				case String string -> "\r\n\r\n";
-				default -> "\r\n" + ContentType.JSON.desciption() + "\r\n\r\n";
-				});
-
-				try {
-					writeChunkRequest(switch (body) {
-					case Path path -> Files.readAllBytes(path);
-					case InputStream inputStream -> inputStream.readAllBytes();
-					case byte[] bytes -> bytes;
-					case String string -> string.getBytes();
-					default -> defaultGson.toJson(body).getBytes();
+			if (needRebuild.compareAndSet(true, false)) {
+				data.forEach((name, body) -> {
+					writeRequest("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"");
+					writeRequest(switch (body) {
+						case Path ignored -> "; filename=\"" + name + "\"\r\n" + ContentType.OCTET.description();
+						case InputStream ignored -> "; filename=\"" + name + "\"\r\n" + ContentType.OCTET.description();
+						case byte[] ignored -> "; filename=\"" + name + "\"\r\n" + ContentType.OCTET.description();
+						case String ignored -> "";
+						default -> "\r\n" + ContentType.JSON.description();
 					});
-				} catch (IOException e) {
-					e.printStackTrace();
-				}
-				writeRequest("\r\n");
-			});
+					writeRequest("\r\n\r\n");
 
-			writeRequest("--" + boundary + "--\r\n");
+					try {
+						writeChunkRequest(switch (body) {
+							case Path path -> Files.readAllBytes(path);
+							case InputStream inputStream -> inputStream.readAllBytes();
+							case byte[] bytes -> bytes;
+							case String string -> string.getBytes();
+							default -> defaultGson.get().toJson(body).getBytes();
+						});
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+					writeRequest("\r\n");
+				});
+				writeRequest("--" + boundary + "--\r\n");
+			}
 			return requestBody.toByteArray();
 		}
 
@@ -687,9 +700,13 @@ public class HttpFlex {
 			data.clear();
 		}
 
-		public void close() throws Exception {
-			requestBody.close();
+		public void close() {
 			data.clear();
+			try {
+				requestBody.close();
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
 		}
 	}
 
@@ -697,31 +714,33 @@ public class HttpFlex {
 	 * Representation of a form-urlencoded request, use to send in
 	 * {@link HttpFlex#post(Object)}.
 	 */
-	public record UrlEncoded(StringBuilder requestBody, Map<String, Object> data) implements AutoCloseable {
+	public record UrlEncoded(StringBuilder requestBody, Map<String, Object> data,
+	                         AtomicBoolean needRebuild) implements AutoCloseable {
 		/**
 		 * Constructs a new form-urlencoded instance.
 		 */
 		public static UrlEncoded instance() {
-			return new UrlEncoded(new StringBuilder(), new LinkedHashMap<>());
+			return new UrlEncoded(new StringBuilder(), new LinkedHashMap<>(), new AtomicBoolean(true));
 		}
 
 		/**
 		 * Put chunk of data to current form-urlencoded.
-		 * 
-		 * @param Map.Entry Key is form-urlencoded name
-		 * @param Map.Entry Value is form-urlencoded data (can be a {@link String},
-		 *                  {@link InputStream}, byte[], or any other class will be
-		 *                  automatically convert to Json string by
-		 *                  {@link HttpFlex#defaultGson})
+		 *
+		 * @param map Map.Entry Key is form-urlencoded name
+		 *            Map.Entry Value is form-urlencoded data (can be a {@link String},
+		 *            {@link InputStream}, byte[], or any other class will be
+		 *            automatically convert to Json string by
+		 *            {@link HttpFlex#defaultGson})
 		 */
 		public <T> UrlEncoded putAll(Map<String, ?> map) {
 			data.putAll(map);
+			needRebuild.set(true);
 			return this;
 		}
 
 		/**
 		 * Put data to current form-urlencoded.
-		 * 
+		 *
 		 * @param name is form-urlencoded name
 		 * @param body is form-urlencoded data (can be a {@link String},
 		 *             {@link InputStream}, byte[], or any other class will be
@@ -730,16 +749,18 @@ public class HttpFlex {
 		 */
 		public <T> UrlEncoded put(String name, T body) {
 			data.put(name, body);
+			needRebuild.set(true);
 			return this;
 		}
 
 		/**
 		 * Remove data of current form-urlencoded.
-		 * 
+		 *
 		 * @param name is form-urlencoded name
 		 */
 		public UrlEncoded remove(String name) {
 			data.remove(name);
+			needRebuild.set(true);
 			return this;
 		}
 
@@ -749,6 +770,7 @@ public class HttpFlex {
 		 *             encode-url)
 		 */
 		public <T> UrlEncoded putEncoded(String name, String body) {
+			needRebuild.set(true);
 			return put(name, URLEncoder.encode(body, StandardCharsets.UTF_8));
 		}
 
@@ -767,29 +789,40 @@ public class HttpFlex {
 		}
 
 		public String build() {
-			data.forEach((name, body) -> {
-				try {
-					requestBody.append("&").append(name).append("=").append(switch (body) {
-					case Path path -> Files.readString(path);
-					case InputStream inputStream -> inputStreamToString(inputStream);
-					case byte[] bytes -> Base64.getEncoder().encodeToString(bytes);
-					case String string -> string;
-					case Boolean b -> b.toString();
-					case Integer i -> i.toString();
-					case Long l -> l.toString();
-					case Float d -> d.toString();
-					case Double d -> d.toString();
-					default -> defaultGson.toJson(body);
-					});
-				} catch (IOException e) {
-					e.printStackTrace();
-				}
-			});
-			return requestBody.deleteCharAt(0).toString();
+			if (needRebuild.compareAndSet(true, false)) {
+				data.forEach((name, body) -> {
+					try {
+						requestBody.append("&").append(name).append("=").append(switch (body) {
+							case Path path -> Files.readString(path);
+							case InputStream inputStream -> inputStreamToString(inputStream);
+							case byte[] bytes -> Base64.getEncoder().encodeToString(bytes);
+							case String string -> string;
+							case Boolean b -> b.toString();
+							case Integer i -> i.toString();
+							case Long l -> l.toString();
+							case Float d -> d.toString();
+							case Double d -> d.toString();
+							default -> defaultGson.get().toJson(body);
+						});
+					} catch (IOException e) {
+						e.printStackTrace();
+					}
+				});
+				requestBody.deleteCharAt(0);
+			}
+			return requestBody.toString();
 		}
 
 		/**
 		 * Re-use instance with empty variable
+		 */
+		public void reset() {
+			requestBody.setLength(0);
+			data.clear();
+		}
+
+		/**
+		 * Remove intsance
 		 */
 		public void close() {
 			requestBody.setLength(0);
@@ -798,31 +831,28 @@ public class HttpFlex {
 	}
 
 	/**
-	 * @param text is String mix Json and normal text
+	 * @param fulltext is String mix Json and normal text
 	 * @return only "{...}" part as String
 	 */
 
 	public static String getJsonstring(String fulltext) {
 		int start = fulltext.indexOf("{");
 		int end = fulltext.lastIndexOf("}");
-		String jsonString = fulltext.substring(start, end + 1);
-		return jsonString;
+		return fulltext.substring(start, end + 1);
 	}
 
 	/**
-	 * @param {@link URI}
+	 * @param uri {@link URI}
 	 * @return Map<Parameter Name, Parameter Value>
 	 */
 	public static Map<String, String> getQueryParams(URI uri) {
-		return Arrays.stream(uri.getQuery().split("&")).map(param -> param.split("="))
-				.collect(Collectors.toMap(pair -> URLDecoder.decode(pair[0], StandardCharsets.UTF_8),
-						pair -> URLDecoder.decode(pair[1], StandardCharsets.UTF_8)));
+		return Arrays.stream(uri.getQuery().split("&")).map(param -> param.split("=")).collect(Collectors.toMap(pair -> URLDecoder.decode(pair[0], StandardCharsets.UTF_8), pair -> URLDecoder.decode(pair[1], StandardCharsets.UTF_8)));
 	}
 
 	/**
 	 * Use for download file from http server
-	 * 
-	 * @param {@link URI}
+	 *
+	 * @param uri {@link URI}
 	 * @return {@link InputStream}
 	 */
 	public static InputStream getFileInputStream(URI uri) {
@@ -831,8 +861,8 @@ public class HttpFlex {
 
 	/**
 	 * Use for download file from http server
-	 * 
-	 * @param {@link URI}
+	 *
+	 * @param uri {@link URI}
 	 * @return byte array
 	 */
 	public static byte[] getFileBytes(URI uri) {
@@ -841,8 +871,8 @@ public class HttpFlex {
 
 	/**
 	 * Use for download file from http server
-	 * 
-	 * @param {@link URI}
+	 *
+	 * @param uri {@link URI}
 	 * @return {@link Path}
 	 */
 	public static Path getFile(URI uri, Path path) {
@@ -859,8 +889,8 @@ public class HttpFlex {
 
 	/**
 	 * Use for download multiple files from http server
-	 * 
-	 * @param {@link List<URI>}
+	 *
+	 * @param uriList {@link List<URI>}
 	 * @return {@link List<InputStream>}
 	 */
 	public static List<InputStream> getFilesInputStreamFromURI(List<URI> uriList) {
@@ -869,9 +899,9 @@ public class HttpFlex {
 
 	/**
 	 * Use for download multiple files from http server
-	 * 
-	 * @param {@link List<URI>}
-	 * @return {@link List<byteArray>}
+	 *
+	 * @param uriList {@link List<URI>}
+	 * @return {@link List<byte[]>}
 	 */
 	public static List<byte[]> getFilesBytesFromURI(List<URI> uriList) {
 		return uriList.stream().map(HttpFlex::getFileBytes).filter(Objects::nonNull).toList();
@@ -879,19 +909,18 @@ public class HttpFlex {
 
 	/**
 	 * Use for download multiple files from http server
-	 * 
-	 * @param {@link List<URI>}
+	 *
+	 * @param uriPathMap {@link Map<URI, Path>}
 	 * @return {@link List<Path>}
 	 */
 	public static List<Path> getFilesFromURI(Map<URI, Path> uriPathMap) {
-		return uriPathMap.entrySet().stream().map(entry -> getFile(entry.getKey(), entry.getValue()))
-				.filter(Objects::nonNull).toList();
+		return uriPathMap.entrySet().stream().map(entry -> getFile(entry.getKey(), entry.getValue())).filter(Objects::nonNull).toList();
 	}
 
 	/**
 	 * Use for download file from http server
-	 * 
-	 * @param {@link String}
+	 *
+	 * @param url {@link String}
 	 * @return {@link InputStream}
 	 */
 	public static InputStream getFileInputStream(String url) {
@@ -904,22 +933,26 @@ public class HttpFlex {
 
 	/**
 	 * Use for download file from http server
-	 * 
-	 * @param {@link String}
+	 *
+	 * @param url {@link String}
 	 * @return byteArray
 	 */
 	public static byte[] getFileBytes(String url) {
-		if (url.startsWith("data:image")) {
-			return Base64.getDecoder().decode(url.split(",")[1]);
-		} else {
-			return getFileBytes(URI.create(url));
+		try {
+			if (url.startsWith("data:image")) {
+				return Base64.getDecoder().decode(url.split(",")[1]);
+			} else {
+				return getFileBytes(URI.create(url));
+			}
+		} catch (Exception e) {
+			return null;
 		}
 	}
 
 	/**
 	 * Use for download file from http server
-	 * 
-	 * @param {@link String}
+	 *
+	 * @param url {@link String}
 	 * @return {@link Path}
 	 */
 	public static Path getFile(String url, Path destinationPath) {
@@ -928,7 +961,7 @@ public class HttpFlex {
 				Files.write(destinationPath, getFileBytes(url), StandardOpenOption.CREATE_NEW);
 			}
 			return destinationPath;
-		} catch (IOException e) {
+		} catch (Exception e) {
 			e.printStackTrace();
 			return null;
 		}
@@ -936,8 +969,8 @@ public class HttpFlex {
 
 	/**
 	 * Use for download multiple files from http server
-	 * 
-	 * @param {@link List<String>}
+	 *
+	 * @param urlList {@link List<String>}
 	 * @return {@link List<InputStream>}
 	 */
 	public static List<InputStream> getFilesInputStream(List<String> urlList) {
@@ -946,9 +979,9 @@ public class HttpFlex {
 
 	/**
 	 * Use for download multiple files from http server
-	 * 
-	 * @param {@link List<String>}
-	 * @return {@link List<byteArray>}
+	 *
+	 * @param urlList {@link List<String>}
+	 * @return {@link List<byte[]>}
 	 */
 	public static List<byte[]> getFilesBytes(List<String> urlList) {
 		return urlList.stream().map(HttpFlex::getFileBytes).filter(Objects::nonNull).toList();
@@ -956,13 +989,11 @@ public class HttpFlex {
 
 	/**
 	 * Use for download multiple files from http server
-	 * 
-	 * @param {@link List<String>}
+	 *
+	 * @param urlPathMap {@link List<String>}
 	 * @return {@link List<Path>}
 	 */
 	public static List<Path> getFiles(Map<String, Path> urlPathMap) {
-		return urlPathMap.entrySet().stream().map(entry -> getFile(entry.getKey(), entry.getValue()))
-				.filter(Objects::nonNull).toList();
+		return urlPathMap.entrySet().stream().map(entry -> getFile(entry.getKey(), entry.getValue())).filter(Objects::nonNull).toList();
 	}
-
 }
